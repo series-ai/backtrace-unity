@@ -24,7 +24,7 @@ namespace Backtrace.Unity
     /// </summary>
     public class BacktraceClient : MonoBehaviour, IBacktraceClient
     {
-        public const string VERSION = "3.8.6";
+        public const string VERSION = "3.10.0";
         internal const string DefaultBacktraceGameObjectName = "BacktraceClient";
         public BacktraceConfiguration Configuration;
 
@@ -65,6 +65,19 @@ namespace Backtrace.Unity
                 _attributeProvider = value;
             }
         }
+
+#if UNITY_ANDROID
+        private bool _useProguard = false;
+
+        /// <summary>
+        /// Allow to enable Proguard support for captured Exceptions.
+        /// </summary>
+        /// <param name="symbolicationId">Proguard map symbolication id</param>
+        public void UseProguard(String symbolicationId) {
+            _useProguard = true;
+            AttributeProvider["symbolication_id"] = symbolicationId;
+        }
+#endif
 
 #if !UNITY_WEBGL
         private BacktraceMetrics _metrics;
@@ -699,7 +712,7 @@ namespace Backtrace.Unity
             _instance = null;
             Application.logMessageReceived -= HandleUnityMessage;
             Application.logMessageReceivedThreaded -= HandleUnityBackgroundException;
-#if UNITY_ANDROID || UNITY_IOS
+#if UNITY_ANDROID || UNITY_IOS || UNITY_STANDALONE_OSX
             Application.lowMemory -= HandleLowMemory;
 #endif
             if (_nativeClient != null)
@@ -971,7 +984,11 @@ namespace Backtrace.Unity
             {
                 Breadcrumbs.FromMonoBehavior(anrMessage, LogType.Warning, new Dictionary<string, string> { { "stackTrace", stackTrace } });
             }
-            SendUnhandledException(hang);
+            var report = new BacktraceReport(hang);
+            if (_useProguard) {
+                report.UseSymbolication("proguard");
+            }
+            SendUnhandledExceptionReport(report);
         }
 
         /// <summary>
@@ -988,15 +1005,20 @@ namespace Backtrace.Unity
             }
             var message = backgroundExceptionMessage.Substring(0, splitIndex);
             var stackTrace = backgroundExceptionMessage.Substring(splitIndex);
+            var report = new BacktraceReport(new BacktraceUnhandledException(message, stackTrace));
+            if (_useProguard) {
+                report.UseSymbolication("proguard");
+            }
+            
             if (Database != null)
             {
-                var backtraceData = new BacktraceReport(new BacktraceUnhandledException(message, stackTrace)).ToBacktraceData(null, GameObjectDepth);
+                var backtraceData = report.ToBacktraceData(null, GameObjectDepth);
                 AttributeProvider.AddAttributes(backtraceData.Attributes.Attributes);
                 Database.Add(backtraceData);
             }
             else
             {
-                HandleUnityMessage(message, stackTrace, LogType.Exception);
+                SendUnhandledExceptionReport(report);
             }
             var androidNativeClient = _nativeClient as Runtime.Native.Android.NativeClient;
             if (androidNativeClient != null)
@@ -1018,7 +1040,7 @@ namespace Backtrace.Unity
             {
                 Application.logMessageReceived += HandleUnityMessage;
                 Application.logMessageReceivedThreaded += HandleUnityBackgroundException;
-#if UNITY_ANDROID || UNITY_IOS
+#if UNITY_ANDROID || UNITY_IOS || UNITY_STANDALONE_OSX
                 Application.lowMemory += HandleLowMemory;
 #endif
             }
@@ -1047,7 +1069,7 @@ namespace Backtrace.Unity
             HandleUnityMessage(message, stackTrace, type);
         }
 
-#if UNITY_ANDROID || UNITY_IOS
+#if UNITY_ANDROID || UNITY_IOS || UNITY_STANDALONE_OSX
         internal void HandleLowMemory()
         {
             if (!Enabled)
@@ -1124,8 +1146,14 @@ namespace Backtrace.Unity
                     Type = type
                 };
             }
+            var report = new BacktraceReport(exception);
+#if UNITY_ANDROID
+            if(exception.NativeStackTrace && _useProguard) {
+                report.UseSymbolication("proguard");
+            }
+#endif
 
-            SendUnhandledException(exception, invokeSkipApi);
+            SendUnhandledExceptionReport(report, invokeSkipApi);
         }
 
         /// <summary>
@@ -1142,15 +1170,15 @@ namespace Backtrace.Unity
             return value > Configuration.Sampling;
         }
 
-        private void SendUnhandledException(BacktraceUnhandledException exception, bool invokeSkipApi = true)
+        private void SendUnhandledExceptionReport(BacktraceReport report, bool invokeSkipApi = true)
         {
             if (OnUnhandledApplicationException != null)
             {
-                OnUnhandledApplicationException.Invoke(exception);
+                OnUnhandledApplicationException.Invoke(report.Exception);
             }
-            if (ShouldSendReport(exception, null, null, invokeSkipApi))
+            if (ShouldSendReport(report.Exception, null, null, invokeSkipApi))
             {
-                SendReport(new BacktraceReport(exception));
+                SendReport(report);
             }
         }
 
